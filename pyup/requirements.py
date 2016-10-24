@@ -2,7 +2,7 @@ from __future__ import unicode_literals
 from pkg_resources import parse_requirements
 from pkg_resources import parse_version
 from pkg_resources._vendor.packaging.specifiers import SpecifierSet
-from .updates import InitialUpdate, SequentialUpdate
+from .updates import InitialUpdate, SequentialUpdate, ScheduledUpdate
 from .pullrequest import PullRequest
 import logging
 from .package import Package, fetch_package
@@ -41,7 +41,6 @@ URL_REGEX = re.compile(
     # resource path
     u"(?:/\S*)?",
     re.UNICODE)
-
 logger = logging.getLogger(__name__)
 
 
@@ -54,9 +53,19 @@ class RequirementsBundle(list):
     def has_file_in_path(self, path):
         return path in [req_file.path for req_file in self]
 
-    def get_updates(self, initial, config):
-        return self.get_initial_update_class()(self, config).get_updates() if initial \
-            else self.get_sequential_update_class()(self, config).get_updates()
+    def get_updates(self, initial, scheduled, config):
+        return self.get_update_class(
+            initial=initial,
+            scheduled=scheduled,
+            config=config
+        )(self, config).get_updates()
+
+    def get_update_class(self, initial, scheduled, config):
+        if initial:
+            return self.get_initial_update_class()
+        elif scheduled and config.is_valid_schedule():
+            return self.get_scheduled_update_class()
+        return self.get_sequential_update_class()
 
     @property
     def requirements(self):
@@ -75,6 +84,9 @@ class RequirementsBundle(list):
 
     def get_initial_update_class(self):  # pragma: no cover
         return InitialUpdate
+
+    def get_scheduled_update_class(self):  # pragma: no cover
+        return ScheduledUpdate
 
     def get_sequential_update_class(self):  # pragma: no cover
         return SequentialUpdate
@@ -182,7 +194,7 @@ class RequirementFile(object):
 
 
 class Requirement(object):
-    def __init__(self, name, specs, hashCmp, line, lineno, index_server):
+    def __init__(self, name, specs, hashCmp, line, lineno, index_server, extras):
         self.name = name
         self.key = name.lower()
         self.specs = specs
@@ -190,6 +202,7 @@ class Requirement(object):
         self.line = line
         self.lineno = lineno
         self.index_server = index_server
+        self.extras = extras
         self.pull_request = None
         self._fetched_package = False
         self._package = None
@@ -313,8 +326,14 @@ class Requirement(object):
             return parse_version(self.version) < parse_version(self.latest_version_within_specs)
         return False
 
+    @property
+    def full_name(self):
+        if self.extras:
+            return "{}[{}]".format(self.name, ",".join(self.extras))
+        return self.name
+
     def update_content(self, content):
-        new_line = "{}=={}".format(self.name, self.latest_version_within_specs)
+        new_line = "{}=={}".format(self.full_name, self.latest_version_within_specs)
         if "#" in self.line:
             new_line += " #" + "#".join(self.line.split("#")[1:])
         regex = r"^{}(?=\s*\r?\n?$)".format(re.escape(self.line))
@@ -333,7 +352,8 @@ class Requirement(object):
             line=s,
             lineno=lineno,
             hashCmp=parsed.hashCmp,
-            index_server=index_server
+            index_server=index_server,
+            extras=parsed.extras
         )
 
     def get_package_class(self):  # pragma: no cover

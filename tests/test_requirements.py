@@ -12,6 +12,14 @@ import os
 
 class RequirementUpdateContent(TestCase):
 
+    def test_update_content_with_extras(self):
+        with patch('pyup.requirements.Requirement.latest_version_within_specs', new_callable=PropertyMock,
+                   return_value="1.4.2"):
+            content = "requests[security]==1.4.1"
+            req = Requirement.parse(content, 0)
+
+            self.assertEqual(req.update_content(content), "requests[security]==1.4.2")
+
     def test_update_content_tabbed(self):
         with patch('pyup.requirements.Requirement.latest_version_within_specs', new_callable=PropertyMock,
                    return_value="1.4.2"):
@@ -729,17 +737,46 @@ class RequirementsBundleTestCase(TestCase):
         reqs.append(RequirementFile(path="foo.txt", content=''))
         self.assertEqual(reqs[0].path, "foo.txt")
 
+    def test_get_initial_update_class(self):
+        req = RequirementsBundle()
+        klass = req.get_update_class(
+            initial=True,
+            scheduled=False,
+            config=None
+        )
+        self.assertEquals(klass, req.get_initial_update_class())
+
+    def test_get_scheduled_update_class(self):
+        req = RequirementsBundle()
+        config = Mock()
+        config.is_valid_schedule.return_value = True
+        klass = req.get_update_class(
+            initial=False,
+            scheduled=True,
+            config=config
+        )
+        self.assertEquals(klass, req.get_scheduled_update_class())
+
+    def test_get_sequential_update_class(self):
+        req = RequirementsBundle()
+        klass = req.get_update_class(
+            initial=False,
+            scheduled=False,
+            config=None
+        )
+        self.assertEquals(klass, req.get_sequential_update_class())
+
     def test_get_updates(self):
         with patch('pyup.requirements.Requirement.package', return_value=Mock()):
             reqs = RequirementsBundle()
             reqs.append(RequirementFile(path="r.txt", content='Bla'))
-            updates = [u for u in reqs.get_updates(True, Mock())]
+            updates = [u for u in reqs.get_updates(True, False, Mock())]
             self.assertEqual(len(updates), 1)
             #self.assertEqual(updates[0].__class__, reqs.get_initial_update_class().__class__)
 
             reqs = RequirementsBundle()
             reqs.append(RequirementFile(path="r.txt", content='Bla'))
-            updates = [u for u in reqs.get_updates(False, Mock())]
+            updates = [u for u in reqs.get_updates(False, False, Mock())]
             self.assertEqual(len(updates), 1)
             #self.assertEqual(updates[0].__class__, reqs.get_sequential_update_class().__class__)
 

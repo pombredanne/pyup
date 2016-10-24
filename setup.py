@@ -16,7 +16,7 @@ with open('HISTORY.rst') as history_file:
 
 requirements = [
     "requests",
-    "pygithub-redux",
+    "pygithub",
     "click",
     "tqdm",
     "pyyaml"
@@ -30,7 +30,7 @@ test_requirements = [
 
 setup(
     name='pyupio',
-    version='0.4.0',
+    version='0.5.0',
     description="A tool to update all your projects requirements",
     long_description=readme + '\n\n' + history,
     author="Jannis Gebauer",

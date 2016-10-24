@@ -17,6 +17,8 @@ class ConfigTestCase(TestCase):
         self.assertEqual(config.pin, True)
         self.assertEqual(config.search, True)
         self.assertEqual(config.requirements, [])
+        self.assertEqual(config.schedule, "")
+        self.assertEqual(config.assignees, [])
 
     def test_pin_file(self):
         config = Config()
@@ -54,6 +56,51 @@ class ConfigTestCase(TestCase):
         self.assertEqual(config.requirements[3].path, "foo.in")
         self.assertEqual(config.requirements[1].pin, True)
         self.assertEqual(config.requirements[1].compile.specs, ["baz.in", "foo.in"])
+
+    def test_valid_schedule(self):
+        config = Config()
+
+        for sched in [
+                "every day",
+                "every week",
+                "every week on monday",
+                "every week on tuesday",
+                "every week on wednesday",
+                "every week on thursday",
+                "every week on friday",
+                "every week on saturday",
+                "every week on sunday",
+                "every two weeks",
+                "every two weeks on monday",
+                "every two weeks on monday",
+                "every two weeks on tuesday",
+                "every two weeks on wednesday",
+                "every two weeks on thursday",
+                "every two weeks on friday",
+                "every two weeks on saturday",
+                "every two weeks on sunday",
+                "every month"]:
+            config.schedule = sched
+            self.assertTrue(config.is_valid_schedule())
+
+        for sched in [
+                "every day on monday",
+                "every month on tuesday",
+                "some other crap",
+                "every bla",
+                "foo"]:
+            config.schedule = sched
+            self.assertFalse(config.is_valid_schedule())
+
+    def test_assignees(self):
+        config = Config()
+        self.assertEqual(config.assignees, [])
+
+        config.update({"assignees": "jay"})
+        self.assertEqual(config.assignees, ["jay"])
+
+        config.update({"assignees": ["jay", "bla"]})
+        self.assertEqual(config.assignees, ["jay", "bla"])
 
 
 class RequirementConfigTestCase(TestCase):
