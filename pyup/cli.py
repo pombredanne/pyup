@@ -43,6 +43,7 @@ def main(repo, user_token, bot_token, provider, dry, branch, initial, pin, close
 
     bot.update(branch=branch, initial=initial, pin=pin, close_prs=close_prs)
 
+
 if __name__ == '__main__':
     main()
 
@@ -54,9 +55,9 @@ class CLIBot(Bot):
         bundle = CLIBundle
         super(CLIBot, self).__init__(repo, user_token, bot_token, provider, bundle)
 
-    def iter_updates(self, initial):
+    def iter_updates(self, initial, scheduled):
 
-        ls = list(super(CLIBot, self).iter_updates(initial))
+        ls = list(super(CLIBot, self).iter_updates(initial, scheduled))
 
         if not initial:
             ls = tqdm(ls, desc="Updating ...")
@@ -82,7 +83,7 @@ class CLIBundle(RequirementsBundle):
 
 
 class CLIRequirementFile(RequirementFile):
-    def iter_lines(self):
+    def iter_lines(self, lineno=0):
         bar = tqdm(self.content.splitlines(), desc="Processing {}".format(self.path))
         for item in bar:
             yield item

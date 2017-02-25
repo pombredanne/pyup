@@ -5,12 +5,14 @@ from pyup.pullrequest import PullRequest
 from datetime import datetime, timedelta
 
 
-def pullrequest_factory(title, state="open", url="http://foo.bar", created_at=datetime.now()):
+def pullrequest_factory(title, state="open", url="http://foo.bar",
+                        created_at=datetime.now(), number=1):
     return PullRequest(
         title=title,
         state=state,
         url=url,
-        created_at=created_at
+        created_at=created_at,
+        number=number
     )
 
 
@@ -50,17 +52,32 @@ class PullRequestTypeTest(TestCase):
         self.assertEqual(pr.type, "scheduled")
         self.assertTrue(pr.is_scheduled)
 
+    def test_is_valid(self):
+        pr = pullrequest_factory(title="Scheduled foo in bar")
+        self.assertTrue(pr.is_valid)
+
+        pr = pullrequest_factory(title="Compile foo.txt")
+        self.assertTrue(pr.is_valid)
+
+        pr = pullrequest_factory(title="Initial Update")
+        self.assertTrue(pr.is_valid)
+
+        pr = pullrequest_factory(title="Pin this on thta")
+        self.assertTrue(pr.is_valid)
+
+        pr = pullrequest_factory(title="Update this and that")
+        self.assertTrue(pr.is_valid)
 
 class PullRequestEQTest(TestCase):
     def test_is_eq(self):
-        pr1 = pullrequest_factory("yay")
-        pr2 = pullrequest_factory("yay", created_at=datetime.now() + timedelta(minutes=4))
+        pr1 = pullrequest_factory("yay", number=1)
+        pr2 = pullrequest_factory("yay", number=2)
         self.assertNotEqual(pr1, pr2)
-        pr1.created_at = pr2.created_at
+        pr1.number = pr2.number
         self.assertEqual(pr1, pr2)
-        pr1.title = "yayy"
+        pr1.number = 3
         self.assertNotEqual(pr1, pr2)
-        pr2.title = "yayy"
+        pr2.number = 3
         self.assertEqual(pr1, pr2)
 
 
@@ -77,16 +94,25 @@ class PullRequestRequirementTestCase(TestCase):
 
     def test_initial_non(self):
         pr = pullrequest_factory(title="Initial PR")
-        self.assertEqual(pr.requirement, None)
+        self.assertEqual(pr.get_requirement(), None)
 
     def test_pin(self):
         pr = pullrequest_factory(title="Pin django")
-        self.assertEqual(pr.requirement, "django")
+        self.assertEqual(pr.get_requirement(), "django")
 
     def test_update(self):
         pr = pullrequest_factory(title="Update django")
-        self.assertEqual(pr.requirement, "django")
+        self.assertEqual(pr.get_requirement(), "django")
 
     def test_some_bogus(self):
         pr = pullrequest_factory(title="Uhm?")
-        self.assertEqual(pr.requirement, None)
+        self.assertEqual(pr.get_requirement(), None)
+
+    def test_with_prefix(self):
+        pr = pullrequest_factory(title="Some Prefix | Update django")
+        self.assertEqual(pr.get_requirement("Some Prefix |"), 'django')
+
+        flask = pullrequest_factory(title="Pin flask")
+        flask_prefix = pullrequest_factory(title="Some Prefix | Pin flask")
+        self.assertIsNotNone(flask.get_requirement())
+        self.assertEqual(flask.get_requirement(), flask_prefix.get_requirement("Some Prefix |"))

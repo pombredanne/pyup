@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 
 class Bot(object):
     def __init__(self, repo, user_token, bot_token=None,
-                 provider=GithubProvider, bundle=RequirementsBundle, config=Config):
+                 provider=GithubProvider, bundle=RequirementsBundle, config=Config,
+                 integration=False):
         self.bot_token = bot_token
         self.req_bundle = bundle()
-        self.provider = provider(self.req_bundle)
+        self.provider = provider(self.req_bundle, integration)
         self.user_token = user_token
         self.bot_token = bot_token
         self.fetched_files = []
@@ -26,8 +27,11 @@ class Bot(object):
         self._bot = None
         self._bot_repo = None
         self.config = config()
+        self.write_config = {}
 
         self._fetched_prs = False
+
+        self.integration = integration
 
     @property
     def user_repo(self):
@@ -56,29 +60,39 @@ class Bot(object):
     @property
     def pull_requests(self):
         if not self._fetched_prs:
-            self.req_bundle.pull_requests = [pr for pr in self.provider.iter_issues(
-                repo=self.user_repo, creator=self.bot if self.bot_token else self.user)]
+            self.req_bundle.pull_requests = [
+                pr for pr in self.provider.iter_issues(
+                    repo=self.user_repo,
+                    creator=self.bot if self.bot_token else self.user
+                )
+                if pr.is_valid
+            ]
             self._fetched_prs = True
         return self.req_bundle.pull_requests
 
-    def get_repo_config(self, repo):
+    def get_repo_config(self, repo, branch=None):
+        branch = self.config.branch if branch is None else branch
         try:
-            content, _ = self.provider.get_file(repo, "/.pyup.yml", self.config.branch)
+            content, _ = self.provider.get_file(repo, "/.pyup.yml", branch)
             if content is not None:
-                return yaml.load(content)
+                return yaml.safe_load(content)
         except yaml.YAMLError:
             logger.warning("Unable to parse config file /.pyup.yml", exc_info=True)
         return None
 
     def configure(self, **kwargs):
+        if kwargs.get("write_config", False):
+            self.write_config = kwargs.get("write_config")
         # if the branch is not set, get the default branch
         if kwargs.get("branch", False) in [None, False]:
             self.config.branch = self.provider.get_default_branch(repo=self.user_repo)
         # set the config for this update run
-        self.config.update(kwargs)
+        self.config.update_config(kwargs)
         repo_config = self.get_repo_config(repo=self.user_repo)
         if repo_config:
-            self.config.update(repo_config)
+            self.config.update_config(repo_config)
+        if self.write_config:
+            self.config.update_config(self.write_config)
         logger.info("Runtime config is: {}".format(self.config))
 
     def update(self, **kwargs):
@@ -96,12 +110,12 @@ class Bot(object):
 
         return self.req_bundle
 
-    def can_pull(self, scheduled):
+    def can_pull(self, initial, scheduled):
         """
         Determines if pull requests should be created
         :return: bool
         """
-        if self.config.is_valid_schedule():
+        if not initial and self.config.is_valid_schedule():
             # if the config has a valid schedule, return True if this is a scheduled run
             return scheduled
         return True
@@ -124,10 +138,15 @@ class Bot(object):
             # up to date. In this case, we create an issue letting the user know that the bot is
             # now set up for this repo and return early.
             if not updates:
+                title = InitialUpdateClass.get_title()
+                if self.config.pr_prefix:
+                    title = "{prefix} {title}".format(prefix=self.config.pr_prefix, title=title)
                 self.create_issue(
-                    title=InitialUpdateClass.get_title(),
+                    title=title,
                     body=InitialUpdateClass.get_empty_update_body()
                 )
+                if self.write_config:
+                    self.pull_config(self.write_config)
                 return
 
         # check if we have an initial PR open. If this is the case, we attach the initial PR
@@ -135,24 +154,29 @@ class Bot(object):
         # before we continue to do anything here.
         initial_pr = next(
             (pr for pr in self.pull_requests if
-             pr.title == InitialUpdateClass.get_title() and pr.is_open),
+             pr.canonical_title(self.config.pr_prefix) ==
+             InitialUpdateClass.get_title() and pr.is_open),
             False
         )
 
+        if initial and self.write_config:
+            self.pull_config(self.write_config)
+
         # todo: This block needs to be refactored
         for title, body, update_branch, updates in self.iter_updates(initial, scheduled):
+            if self.config.pr_prefix:
+                title = "{prefix} {title}".format(prefix=self.config.pr_prefix, title=title)
             if initial_pr:
                 pull_request = initial_pr
-            elif self.can_pull(scheduled) and title not in [pr.title for pr in self.pull_requests]:
+            elif self.can_pull(initial, scheduled) and \
+                    title not in [pr.title for pr in self.pull_requests]:
+                update_branch = self.config.branch_prefix + update_branch
                 pull_request = self.commit_and_pull(
                     initial=initial,
-                    base_branch=self.config.branch,
                     new_branch=update_branch,
                     title=title,
                     body=body,
                     updates=updates,
-                    pr_label=self.config.label_prs,
-                    assignees=self.config.assignees
                 )
             else:
                 pull_request = next((pr for pr in self.pull_requests if pr.title == title), None)
@@ -181,14 +205,17 @@ class Bot(object):
         :param update:
         :param pull_request:
         """
-        logger.info("Preparing to close stale PRs for {}".format(pull_request.title))
+        closed = []
         if self.bot_token and not pull_request.is_initial:
             for pr in self.pull_requests:
                 close_pr = False
-                logger.info("Checking PR {}".format(pr.title))
+                same_title = \
+                    pr.canonical_title(self.config.pr_prefix) == \
+                    pull_request.canonical_title(self.config.pr_prefix)
+
                 if scheduled and pull_request.is_scheduled:
                     # check that the PR is open and the title does not match
-                    if pr.is_open and pr.title != pull_request.title:
+                    if pr.is_open and not same_title:
                         # we want to close the previous scheduled PR if it is not merged yet
                         # and we want to close all previous updates if the user choose to
                         # switch to a scheduled update
@@ -198,9 +225,9 @@ class Bot(object):
                     # check that, the pr is an update, is open, the titles are not equal and that
                     # the requirement matches
                     if pr.is_update and \
-                            pr.is_open and \
-                            pr.title != pull_request.title and \
-                            pr.requirement == update.requirement.key:
+                        pr.is_open and \
+                            not same_title and \
+                            pr.get_requirement(self.config.pr_prefix) == update.requirement.key:
                         # there's a possible race condition where multiple updates with more than
                         # one target version conflict with each other (closing each others PRs).
                         # Check that's not the case here
@@ -208,13 +235,19 @@ class Bot(object):
                             close_pr = True
 
                 if close_pr and self.is_bot_the_only_committer(pr=pr):
+                    logger.info("Closing stale PR {} for {}".format(pr.title, pull_request.title))
                     self.provider.close_pull_request(
                         bot_repo=self.bot_repo,
                         user_repo=self.user_repo,
                         pull_request=pr,
                         comment="Closing this in favor of #{}".format(
-                            pull_request.number)
+                            pull_request.number),
+                        prefix=self.config.branch_prefix
                     )
+                    pr.state = "closed"
+                    closed.append(pr)
+        for closed_pr in closed:
+            self.pull_requests.remove(closed_pr)
 
     def is_bot_the_only_committer(self, pr):
         """
@@ -222,16 +255,20 @@ class Bot(object):
         :param update: Update to check
         :return: bool - True if conflict found
         """
-        logger.info("check if bot is only committer")
         committer = self.provider.get_pull_request_committer(
             self.user_repo,
             pr)
         # flatten the list and remove duplicates
         committer_set = set([c.login for c in committer])
+
+        # it's impossible to get the bots login if this is an integration, just check that
+        # there's only one commit in the commit history.
+        if self.integration:
+            return len(committer_set) == 1
+
         # check that there's exactly one committer in this PRs commit history and
         # that the committer is the bot
-        return len(committer_set) == 1 and \
-            self.provider.is_same_user(self.bot, committer[0])
+        return len(committer_set) == 1 and self.provider.is_same_user(self.bot, committer[0])
 
     def has_conflicting_update(self, update):
         """
@@ -244,10 +281,14 @@ class Bot(object):
         # with both `initial` and `scheduled` == False
         for _, _, _, updates in self.iter_updates(initial=False, scheduled=False):
             for _update in updates:
-                if (update.requirement.key == _update.requirement.key and
-                    (update.commit_message != _update.commit_message or
-                        update.requirement.latest_version_within_specs !=
-                        _update.requirement.latest_version_within_specs)):
+                if (
+                        update.requirement.key == _update.requirement.key and
+                        (
+                                update.commit_message != _update.commit_message or
+                                update.requirement.latest_version_within_specs !=
+                                _update.requirement.latest_version_within_specs
+                        )
+                ):
                     logger.info("{} conflicting with {}/{}".format(
                         update.requirement.key,
                         update.requirement.latest_version_within_specs,
@@ -256,40 +297,92 @@ class Bot(object):
                     return True
         return False
 
-    def create_branch(self, base_branch, new_branch, delete_empty=False):
+    def create_branch(self, new_branch, delete_empty=False):
         """
         Creates a new branch.
-        :param base_branch: string name of the base branch
         :param new_branch: string name of the new branch
         :param delete_empty: bool -- delete the branch if it is empty
         :return: bool -- True if successfull
         """
-        logger.info("Preparing to create branch {} from {}".format(new_branch, base_branch))
+        logger.info("Preparing to create branch {} from {}".format(new_branch, self.config.branch))
         try:
             # create new branch
             self.provider.create_branch(
-                base_branch=base_branch,
+                base_branch=self.config.branch,
                 new_branch=new_branch,
                 repo=self.user_repo
             )
-            logger.info("Created branch {} from {}".format(new_branch, base_branch))
+            logger.info("Created branch {} from {}".format(new_branch, self.config.branch))
             return True
         except BranchExistsError:
             logger.info("Branch {} exists.".format(new_branch))
             # if the branch exists, is empty and delete_empty is set, delete it and call
             # this function again
             if delete_empty:
-                if self.provider.is_empty_branch(self.user_repo, base_branch, new_branch):
-                    self.provider.delete_branch(self.user_repo, new_branch)
+                if self.provider.is_empty_branch(self.user_repo, self.config.branch, new_branch,
+                                                 self.config.branch_prefix):
+                    self.provider.delete_branch(self.user_repo, new_branch,
+                                                self.config.branch_prefix)
                     logger.info("Branch {} was empty and has been deleted".format(new_branch))
-                    return self.create_branch(base_branch, new_branch, delete_empty=False)
+                    return self.create_branch(new_branch, delete_empty=False)
                 logger.info("Branch {} is not empty".format(new_branch))
         return False
 
-    def commit_and_pull(self, initial, base_branch, new_branch, title, body, updates, pr_label,
-                        assignees):
+    def pull_config(self, new_config):  # pragma: no cover
+        """
+
+        :param new_config:
+        :return:
+        """
+        logger.info("Creating new config file with {}".format(new_config))
+        branch = 'pyup-config'
+        if self.create_branch(branch, delete_empty=True):
+            content = self.config.generate_config_file(new_config)
+            _, content_file = self.provider.get_file(self.user_repo, '/.pyup.yml', branch)
+            if content_file:
+                # a config file exists, update and commit it
+                logger.info(
+                    "Config file exists, updating config for sha {}".format(content_file.sha))
+                self.provider.create_commit(
+                    repo=self.user_repo,
+                    path="/.pyup.yml",
+                    branch=branch,
+                    content=content,
+                    commit_message="update pyup.io config file",
+                    committer=self.bot if self.bot_token else self.user,
+                    sha=content_file.sha
+                )
+            logger.info("No config file found, writing new config file")
+            # there's no config file present, write a new config file and commit it
+            self.provider.create_and_commit_file(
+                repo=self.user_repo,
+                path="/.pyup.yml",
+                branch=branch,
+                content=content,
+                commit_message="create pyup.io config file",
+                committer=self.bot if self.bot_token else self.user,
+            )
+
+            title = 'Config file for pyup.io'
+            if self.config.pr_prefix:
+                title = "{prefix} {title}".format(prefix=self.config.pr_prefix, title=title)
+            body = 'Hi there and thanks for using pyup.io!\n' \
+                   '\n' \
+                   "Since you are using a non-default config I've created one for you.\n\n" \
+                   "There are a lot of things you can configure on top of " \
+                   "that, so make sure to check out the " \
+                   "[docs](https://pyup.io/docs/configuration/) to see what I can do for you."
+
+            pr = self.create_pull_request(
+                title=title,
+                body=body,
+                new_branch=branch,
+            )
+            return pr
+
+    def commit_and_pull(self, initial, new_branch, title, body, updates):
         logger.info("Preparing commit {}".format(title))
-        if self.create_branch(base_branch, new_branch, delete_empty=False):
+        if self.create_branch(new_branch, delete_empty=False):
             updated_files = {}
             for update in self.iter_changes(initial, updates):
                 if update.requirement_file.path in updated_files:
@@ -299,7 +392,7 @@ class Bot(object):
                     sha = update.requirement_file.sha
                     content = update.requirement_file.content
                 old_content = content
-                content = update.requirement.update_content(content)
+                content = update.requirement.update_content(content, self.config.update_hashes)
                 if content != old_content:
                     new_sha = self.provider.create_commit(
                         repo=self.user_repo,
@@ -321,10 +414,7 @@ class Bot(object):
                 pr = self.create_pull_request(
                     title=title,
                     body=body,
-                    base_branch=base_branch,
                     new_branch=new_branch,
-                    pr_label=pr_label,
-                    assignees=assignees
                 )
                 self.pull_requests.append(pr)
                 return pr
@@ -337,7 +427,7 @@ class Bot(object):
             body=body,
         )
 
-    def create_pull_request(self, title, body, base_branch, new_branch, pr_label, assignees):
+    def create_pull_request(self, title, body, new_branch):
 
         # if we have a bot user that creates the PR, we might run into problems on private
         # repos because the bot has to be a collaborator. We try to submit the PR before checking
@@ -348,10 +438,10 @@ class Bot(object):
                     repo=self.bot_repo,
                     title=title,
                     body=body,
-                    base_branch=base_branch,
+                    base_branch=self.config.branch,
                     new_branch=new_branch,
-                    pr_label=pr_label,
-                    assignees=assignees
+                    pr_label=self.config.label_prs,
+                    assignees=self.config.assignees
                 )
             except NoPermissionError:
                 self.provider.get_pull_request_permissions(self.bot, self.user_repo)
@@ -360,13 +450,14 @@ class Bot(object):
             repo=self.bot_repo if self.bot_token else self.user_repo,
             title=title,
             body=body,
-            base_branch=base_branch,
+            base_branch=self.config.branch,
             new_branch=new_branch,
-            pr_label=pr_label,
-            assignees=assignees
+            pr_label=self.config.label_prs,
+            assignees=self.config.assignees
         )
 
-    def iter_git_tree(self, branch):
+    def iter_git_tree(self, sha=None):
+        branch = sha if sha is not None else self.config.branch
         return self.provider.iter_git_tree(branch=branch, repo=self.user_repo)
 
     def iter_updates(self, initial, scheduled):
@@ -381,24 +472,25 @@ class Bot(object):
 
     # if this function gets updated, the gist at https://gist.github.com/jayfk/45862b05836701b49b01
     # needs to be updated too
-    def get_all_requirements(self):
+    def get_all_requirements(self, sha=None):
         if self.config.search:
             logger.info("Searching requirement files")
-            for file_type, path in self.iter_git_tree(self.config.branch):
+            for file_type, path in self.iter_git_tree(sha=sha):
                 if file_type == "blob":
                     if "requirements" in path:
                         if path.endswith("txt") or path.endswith("pip"):
-                            self.add_requirement_file(path)
+                            self.add_requirement_file(path, sha)
         for req_file in self.config.requirements:
             self.add_requirement_file(req_file.path)
 
     # if this function gets updated, the gist at https://gist.github.com/jayfk/c6509bbaf4429052ca3f
     # needs to be updated too
-    def add_requirement_file(self, path):
+    def add_requirement_file(self, path, sha=None):
         logger.info("Adding requirement file at {}".format(path))
+        branch = sha if sha is not None else self.config.branch
         if not self.req_bundle.has_file_in_path(path):
             req_file = self.provider.get_requirement_file(
-                path=path, repo=self.user_repo, branch=self.config.branch)
+                path=path, repo=self.user_repo, branch=branch)
             if req_file is not None:
                 self.req_bundle.append(req_file)
                 for other_file in req_file.other_files:
@@ -406,6 +498,5 @@ class Bot(object):
 
 
 class DryBot(Bot):
-    def commit_and_pull(self, initial, base_branch, new_branch, title, body,
-                        updates):  # pragma: no cover
+    def commit_and_pull(self, initial, new_branch, title, body, updates):  # pragma: no cover
         return None

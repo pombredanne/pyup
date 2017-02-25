@@ -108,24 +108,32 @@ class ProviderTest(TestCase):
 
     def test_is_empty_branch(self):
         with self.assertRaises(AssertionError):
-            self.provider.is_empty_branch(self.repo, "master", "foo")
+            self.provider.is_empty_branch(self.repo, "master", "foo", prefix="bar")
 
         self.repo.compare().total_commits = 0
         self.assertTrue(
-            self.provider.is_empty_branch(self.repo, "master", "pyup-foo")
+            self.provider.is_empty_branch(self.repo, "master", "pyup-foo", prefix="pyup-")
+        )
+
+        self.repo.compare().total_commits = 0
+        self.assertTrue(
+            self.provider.is_empty_branch(self.repo, "master", "pyup/foo", prefix="pyup/")
         )
 
         self.repo.compare().total_commits = 1
         self.assertFalse(
-            self.provider.is_empty_branch(self.repo, "master", "pyup-foo")
+            self.provider.is_empty_branch(self.repo, "master", "pyup-foo", prefix="pyup-")
         )
 
     def test_delete_branch(self):
         with self.assertRaises(AssertionError):
-            self.provider.delete_branch(self.repo, "foo")
+            self.provider.delete_branch(self.repo, "foo", prefix="bar")
 
-        self.provider.delete_branch(self.repo, "pyup-foo")
+        self.provider.delete_branch(self.repo, "pyup-foo", prefix="pyup-")
         self.repo.get_git_ref.assert_called_once_with("heads/pyup-foo")
+
+        self.provider.delete_branch(self.repo, "pyup/foo", prefix="pyup/")
+        self.repo.get_git_ref.assert_called_with("heads/pyup/foo")
 
     @patch("pyup.providers.github.time")
     def test_create_commit(self, time):
@@ -138,6 +146,34 @@ class ProviderTest(TestCase):
         with self.assertRaises(GithubException):
             self.provider.create_commit("path", "branch", "commit", "content", "sha", self.repo,
                                         "com")
+
+    def test_create_and_commit_file(self):
+        repo = Mock()
+        path, branch, content, commit_message, committer = (
+            '/foo.txt',
+            'some-branch',
+            'content',
+            'some-message',
+            'johnny'
+        )
+        committer_data = Mock()
+        committer_data.return_value = 'committer-data'
+        self.provider.get_committer_data = committer_data
+        data = self.provider.create_and_commit_file(
+            repo=repo,
+            path=path,
+            commit_message=commit_message,
+            branch=branch,
+            content=content,
+            committer=committer
+        )
+        repo.create_file.assert_called_once_with(
+            path=path,
+            message=commit_message,
+            content=content,
+            branch=branch,
+            committer='committer-data'
+        )
 
     def test_get_committer_data(self):
         committer = Mock()
@@ -180,16 +216,22 @@ class ProviderTest(TestCase):
         pr.head.ref = "bla"
         self.repo.get_pull.return_value = pr
         with self.assertRaises(AssertionError):
-            self.provider.close_pull_request(self.repo, self.repo, pr, "comment")
+            self.provider.close_pull_request(self.repo, self.repo, pr, "comment", prefix="pyup-")
 
         pr.head.ref = "pyup-bla"
-        self.provider.close_pull_request(self.repo, self.repo, pr, "comment")
+        self.provider.close_pull_request(self.repo, self.repo, pr, "comment", prefix="pyup-")
         self.assertEquals(self.repo.get_git_ref().delete.call_count, 1)
 
         self.repo.get_pull.side_effect = UnknownObjectException(data="", status=1)
-        data = self.provider.close_pull_request(self.repo, self.repo, Mock(), "comment")
+        data = self.provider.close_pull_request(self.repo, self.repo, Mock(), "comment",
+                                                prefix="pyup-")
         self.assertEqual(data, False)
 
+    def test_create_pull_request_with_exceeding_body(self):
+        body = ''.join(["a" for i in range(0, 65536 + 1)])
+        self.provider.create_pull_request(self.repo, "title", body, "master", "new", False, [])
+        self.assertEquals(self.provider.bundle.get_pull_request_class.call_count, 1)
+        self.assertEquals(self.provider.bundle.get_pull_request_class().call_count, 1)
 
     def test_create_pull_request(self):
         self.provider.create_pull_request(self.repo, "title", "body", "master", "new", False, [])

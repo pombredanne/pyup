@@ -21,21 +21,24 @@ class PullRequest(object):
         self.issue = issue
 
     def __eq__(self, other):
-        return isinstance(other, self.__class__) and self.__dict__ == other.__dict__
+        return isinstance(other, self.__class__) and self.number == other.number
+
+    def canonical_title(self, prefix):
+        return self.title.replace("{} ".format(prefix), "") if prefix else self.title
 
     @property
     def type(self):
-        if self.title.startswith("Update"):
+        if "Update " in self.title:
             return PullRequest.UPDATE_TYPE
-        elif self.title.startswith("Security"):
+        elif "Security" in self.title:
             return PullRequest.SECURITY_TYPE
-        elif self.title.startswith("Pin"):
+        elif "Pin" in self.title:
             return PullRequest.PIN_TYPE
-        elif self.title.startswith("Initial"):
+        elif "Initial" in self.title:
             return PullRequest.INITIAL_TYPE
-        elif self.title.startswith("Compile"):
+        elif "Compile" in self.title:
             return PullRequest.COMPILE_TYPE
-        elif self.title.startswith("Scheduled"):
+        elif "Scheduled" in self.title:
             return PullRequest.SCHEDULED_TYPE
         return PullRequest.UNKNOWN_TYPE
 
@@ -68,9 +71,15 @@ class PullRequest(object):
         return self.state == "open"
 
     @property
-    def requirement(self):
+    def is_valid(self):
+        return self.is_update or self.is_security \
+               or self.is_pin or self.is_initial \
+               or self.is_compile or self.is_scheduled
+
+    def get_requirement(self, prefix=""):
         if self.type != "initial":
-            parts = self.title.split(" ")
+            title = self.canonical_title(prefix)
+            parts = title.split(" ")
             if len(parts) >= 2:
                 return parts[1].lower()
         return None

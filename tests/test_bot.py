@@ -19,10 +19,10 @@ def bot_factory(repo="foo/foo", user_token="foo", bot_token=None, bot_class=Bot,
     bot._fetched_prs = True
     bot.req_bundle.pull_requests = prs
     bot.provider = Mock()
-    bot.config.update({
+    bot.config.update_config({
         "close_prs": True,
         "pin": True,
-        "branch": "master",
+        "branch": "base_branch",
         "search": True
     })
     return bot
@@ -114,6 +114,12 @@ class BotConfigureTest(TestCase):
         bot.configure()
         self.assertEqual(bot.config.branch, "2.0")
 
+    def test_write_config(self):
+        bot = bot_factory()
+        bot.provider.get_file.return_value = None, None
+        bot.configure(write_config={'branch': 'bogus-branch'})
+        self.assertEqual(bot.config.branch, "bogus-branch")
+
 
 class BotUpdateTest(TestCase):
     def test_branch_is_none(self):
@@ -160,6 +166,32 @@ class BotApplyUpdateTest(TestCase):
             body=InitialUpdate.get_empty_update_body()
         )
 
+    def test_updates_empty_with_prefix(self):
+        bot = bot_factory()
+        bot.config.pr_prefix = "Some Prefix"
+        bot.create_issue = Mock()
+        bot.req_bundle.get_updates = Mock(side_effect=IndexError)
+        bot.apply_updates(initial=True, scheduled=False)
+        bot.create_issue.assert_called_once_with(
+            title="Some Prefix " + InitialUpdate.get_title(),
+            body=InitialUpdate.get_empty_update_body()
+        )
+
+    def test_updates_empty_with_write_config(self):
+        bot = bot_factory()
+        bot.write_config = {'foo': 'bar'}
+        bot.create_issue = Mock()
+        bot.req_bundle.get_updates = Mock(side_effect=IndexError)
+        bot.pull_config = Mock()
+        bot.apply_updates(initial=True, scheduled=False)
+        bot.create_issue.assert_called_once_with(
+            title=InitialUpdate.get_title(),
+            body=InitialUpdate.get_empty_update_body()
+        )
+        bot.pull_config.assert_called_once_with(
+            {'foo': 'bar'}
+        )
+
     def test_apply_update_pull_request_new(self):
         the_requirement = Mock()
         the_pull = pullrequest_factory("The PR")
@@ -175,6 +207,50 @@ class BotApplyUpdateTest(TestCase):
         bot.apply_updates(initial=True, scheduled=False)
 
         self.assertEqual(the_requirement.pull_request, the_pull)
+
+    def test_apply_update_with_prefix_pull_request_new(self):
+        the_requirement = Mock()
+        the_pull = pullrequest_factory("The PR")
+
+        bot = bot_factory(prs=[the_pull])
+        bot.config.pr_prefix = "Some Prefix"
+        bot.req_bundle.get_updates = Mock()
+        update = RequirementUpdate(
+            requirement_file="foo", requirement=the_requirement, commit_message="foo"
+        )
+        bot.req_bundle.get_updates.return_value = [("The PR", "", "", [update])]
+        bot.commit_and_pull = Mock()
+        bot.commit_and_pull.return_value = the_pull
+        bot.apply_updates(initial=False, scheduled=False)
+        self.assertEqual(the_requirement.pull_request, the_pull)
+        bot.commit_and_pull.assert_called_once_with(
+            body='',
+            initial=False,
+            new_branch=u'pyup-',
+            title=u'Some Prefix The PR',
+            updates=[update]
+        )
+
+    def test_apply_update_with_write_config(self):
+        the_requirement = Mock()
+        the_pull = pullrequest_factory("The PR")
+
+        bot = bot_factory(prs=[the_pull])
+        bot.write_config = {'foo': 'bar'}
+        bot.pull_config = Mock()
+        bot.req_bundle.get_updates = Mock()
+        update = RequirementUpdate(
+            requirement_file="foo", requirement=the_requirement, commit_message="foo"
+        )
+        bot.req_bundle.get_updates.return_value = [("The PR", "", "", [update])]
+        bot.commit_and_pull = Mock()
+        bot.commit_and_pull.return_value = the_pull
+        bot.apply_updates(initial=True, scheduled=False)
+
+        self.assertEqual(the_requirement.pull_request, the_pull)
+        bot.pull_config.assert_called_once_with(
+            {'foo': 'bar'}
+        )
 
     def test_close_stall_prs_called(self):
         the_requirement = Mock()
@@ -288,7 +364,7 @@ class BotCommitAndPullTest(TestCase):
             )
         ]
 
-        bot.commit_and_pull(True, "branch", "new branch", "repo", "", updates, False, [])
+        bot.commit_and_pull(True, "new branch", "repo", "", updates)
 
         self.assertEqual(bot.provider.create_commit.called, True)
         self.assertEqual(bot.provider.create_commit.call_count, 2)
@@ -300,22 +376,22 @@ class BotCommitAndPullTest(TestCase):
     def test_create_branch_fails(self):
         bot = bot_factory()
         bot.create_branch = Mock(return_value=False)
-        self.assertEqual(bot.commit_and_pull(None, None, None, None, None, None, None, None), None)
+        self.assertEqual(bot.commit_and_pull(None, None, None, None, None), None)
 
 
 class CreateBranchTest(TestCase):
 
     def test_success(self):
         bot = bot_factory()
-        self.assertEqual(bot.create_branch("master", "new-branch", delete_empty=False), True)
+        self.assertEqual(bot.create_branch("new-branch", delete_empty=False), True)
         bot.provider.create_branch.assert_called_once_with(
-            base_branch="master", new_branch="new-branch", repo=bot.user_repo)
+            base_branch="base_branch", new_branch="new-branch", repo=bot.user_repo)
 
     def test_error_dont_delete(self):
         from pyup.errors import BranchExistsError
         bot = bot_factory()
         bot.provider.create_branch.side_effect = BranchExistsError
-        self.assertEqual(bot.create_branch("master", "new-branch", delete_empty=False), False)
+        self.assertEqual(bot.create_branch("new-branch", delete_empty=False), False)
         bot.provider.is_empty_branch.assert_not_called()
         bot.provider.delete_branch.assert_not_called()
 
@@ -324,7 +400,7 @@ class CreateBranchTest(TestCase):
         bot = bot_factory()
         bot.provider.create_branch.side_effect = BranchExistsError
         bot.provider.is_empty_branch.return_value = True
-        bot.create_branch("master", "new-branch", delete_empty=True)
+        bot.create_branch("new-branch", delete_empty=True)
 
         self.assertEquals(bot.provider.is_empty_branch.call_count, 1)
         self.assertEquals(bot.provider.delete_branch.call_count, 1)
@@ -335,7 +411,7 @@ class CreateBranchTest(TestCase):
         bot = bot_factory()
         bot.provider.create_branch.side_effect = BranchExistsError
         bot.provider.is_empty_branch.return_value = False
-        bot.create_branch("master", "new-branch", delete_empty=True)
+        bot.create_branch("new-branch", delete_empty=True)
 
         self.assertEquals(bot.provider.is_empty_branch.call_count, 1)
         bot.provider.delete_branch.assert_not_called()
@@ -465,20 +541,27 @@ class BotCanPullTest(TestCase):
         bot = bot_factory(bot_token=None)
         bot.config.is_valid_schedule = Mock()
         bot.config.is_valid_schedule.return_value = True
-        self.assertFalse(bot.can_pull(False))
+        self.assertFalse(bot.can_pull(False, False))
 
     def test_valid_schedule_and_scheduled_run(self):
         bot = bot_factory(bot_token=None)
         bot.config.is_valid_schedule = Mock()
         bot.config.is_valid_schedule.return_value = True
-        self.assertTrue(bot.can_pull(True))
+        self.assertTrue(bot.can_pull(False, True))
 
     def test_no_schedule(self):
         bot = bot_factory(bot_token=None)
         bot.config.is_valid_schedule = Mock()
         bot.config.is_valid_schedule.return_value = False
-        self.assertTrue(bot.can_pull(False))
-        self.assertTrue(bot.can_pull(True))
+        self.assertTrue(bot.can_pull(False, False))
+        self.assertTrue(bot.can_pull(False, True))
+
+    def test_initial(self):
+        bot = bot_factory(bot_token=None)
+        bot.config.is_valid_schedule = Mock()
+        bot.config.is_valid_schedule.return_value = False
+        self.assertTrue(bot.can_pull(True, False))
+        self.assertTrue(bot.can_pull(True, True))
 
 
 class BotCreatePullRequestTest(TestCase):
@@ -487,7 +570,7 @@ class BotCreatePullRequestTest(TestCase):
         bot = bot_factory(bot_token=None)
         bot._bot_repo = "BOT REPO"
         bot._user_repo = "USER REPO"
-        bot.create_pull_request("title", "body", "base_branch", "new_branch", False, [])
+        bot.create_pull_request("title", "body", "new_branch")
         self.assertEqual(bot.provider.create_pull_request.called, True)
         self.assertEqual(bot.provider.create_pull_request.call_args_list[0][1], {
             "base_branch": "base_branch",
@@ -503,7 +586,7 @@ class BotCreatePullRequestTest(TestCase):
         bot = bot_factory(bot_token="foo")
         bot._bot_repo = "BOT REPO"
         bot._user_repo = "USER REPO"
-        bot.create_pull_request("title", "body", "base_branch", "new_branch", False, [])
+        bot.create_pull_request("title", "body", "new_branch")
         self.assertEqual(bot.provider.create_pull_request.called, True)
         self.assertEqual(bot.provider.create_pull_request.call_args_list[0][1], {
             "base_branch": "base_branch",
@@ -521,7 +604,7 @@ class BotCreatePullRequestTest(TestCase):
         bot.provider.create_pull_request.side_effect = [NoPermissionError, "the foo"]
         bot._bot_repo = "BOT REPO"
         bot._user_repo = "USER REPO"
-        bot.create_pull_request("title", "body", "base_branch", "new_branch", False, [])
+        bot.create_pull_request("title", "body", "new_branch")
         self.assertEqual(bot.provider.create_pull_request.called, True)
         self.assertEqual(bot.provider.create_pull_request.call_args_list[0][1], {
             "base_branch": "base_branch",
@@ -540,6 +623,7 @@ class BotCreatePullRequestTest(TestCase):
             "title": "title",
             "pr_label": False,
             "assignees": []
+
         })
 
     def test_bot_permission_error_not_resolved(self):
@@ -548,7 +632,7 @@ class BotCreatePullRequestTest(TestCase):
         bot._bot_repo = "BOT REPO"
         bot._user_repo = "USER REPO"
         with self.assertRaises(NoPermissionError):
-            bot.create_pull_request("title", "body", "base_branch", "new_branch", False, [])
+            bot.create_pull_request("title", "body", "new_branch")
         self.assertEqual(bot.provider.create_pull_request.called, True)
         self.assertEqual(bot.provider.create_pull_request.call_args_list[0][1], {
             "base_branch": "base_branch",
@@ -576,6 +660,7 @@ class CloseStalePRsTestCase(TestCase):
 
         self.pr = Mock()
         self.pr.title = "First PR"
+        self.pr.canonical_title.return_value = "First PR"
         self.pr.number = 100
         self.pr.type = "update"
         self.pr.is_update = True
@@ -588,7 +673,8 @@ class CloseStalePRsTestCase(TestCase):
         self.other_pr.type = "update"
         self.other_pr.is_open = True
         self.other_pr.title = "Second PR"
-        self.other_pr.requirement = "some-req"
+        self.other_pr.canonical_title.return_value = "Second PR"
+        self.other_pr.get_requirement.return_value = "some-req"
         self.other_pr.is_update = True
         self.other_pr.is_initial = False
 
@@ -614,7 +700,6 @@ class CloseStalePRsTestCase(TestCase):
 
         bot.provider.get_pull_request_committer.assert_called_once_with(bot.user_repo,
                                                                         self.other_pr)
-
 
     def test_no_bot_token(self):
         bot = bot_factory()
@@ -642,7 +727,43 @@ class CloseStalePRsTestCase(TestCase):
             bot_repo=bot.bot_repo,
             user_repo=bot.user_repo,
             pull_request=self.other_pr,
-            comment="Closing this in favor of #100"
+            comment="Closing this in favor of #100",
+            prefix="pyup-"
+        )
+
+    def test_close_integration(self):
+        bot = bot_factory(bot_token="foo", prs=[self.other_pr])
+        bot.integration = True
+        bot.provider.integration = True
+        commiter = Mock()
+        bot.provider.get_pull_request_committer.return_value = [commiter]
+
+        bot.close_stale_prs(self.update, self.pr, False)
+
+        bot.provider.get_pull_request_committer.assert_called_once_with(bot.user_repo, self.other_pr)
+        bot.provider.close_pull_request.assert_called_once_with(
+            bot_repo=bot.bot_repo,
+            user_repo=bot.user_repo,
+            pull_request=self.other_pr,
+            comment="Closing this in favor of #100",
+            prefix="pyup-"
+        )
+
+    def test_close_success_with_prefix(self):
+        bot = bot_factory(bot_token="foo", prs=[self.other_pr])
+        bot.config.pr_prefix = "Some Prefix"
+        commiter = Mock()
+        bot.provider.get_pull_request_committer.return_value = [commiter]
+
+        bot.close_stale_prs(self.update, self.pr, False)
+
+        bot.provider.get_pull_request_committer.assert_called_once_with(bot.user_repo, self.other_pr)
+        bot.provider.close_pull_request.assert_called_once_with(
+            bot_repo=bot.bot_repo,
+            user_repo=bot.user_repo,
+            pull_request=self.other_pr,
+            comment="Closing this in favor of #100",
+            prefix="pyup-"
         )
 
     def test_wrong_pr_type(self):
@@ -668,8 +789,10 @@ class CloseStalePRsTestCase(TestCase):
         bot.provider.close_pull_request.assert_not_called()
 
     def test_same_title(self):
+
         bot = bot_factory(bot_token="foo", prs=[self.other_pr])
         self.other_pr.title = "First PR"
+        self.other_pr.canonical_title.return_value = "First PR"
         commiter = Mock()
         bot.provider.get_pull_request_committer.return_value = [commiter]
 
@@ -678,9 +801,10 @@ class CloseStalePRsTestCase(TestCase):
         bot.provider.get_pull_request_committer.assert_not_called()
         bot.provider.close_pull_request.assert_not_called()
 
+
     def test_requirement_doesnt_match(self):
         bot = bot_factory(bot_token="foo", prs=[self.other_pr])
-        self.other_pr.requirement = "other-req"
+        self.other_pr.get_requirement.return_value = "other-req"
         commiter = Mock()
         bot.provider.get_pull_request_committer.return_value = [commiter]
 
